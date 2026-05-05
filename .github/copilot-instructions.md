@@ -30,13 +30,14 @@ Core flow in `main()`:
 4. Ensure target root chain exists (`ensure_group_path()`).
 5. Recurse through source groups (`migrate_group_recursive()`):
    - create missing target groups/projects through GitLab API,
-   - mirror each project via local bare clone/push (`git clone --mirror` + `git push --mirror`).
+   - mirror each project via persistent local bare cache under `repositories_mirror-use` (`git fetch --prune` + `git push --mirror`).
 
 Functional layers:
 - **Config + behavior flags:** top-level env parsing (`DRY_RUN`, `AUTO_CONFIRM`, `PUSH_EXISTING_PROJECTS`, `CONTINUE_ON_ERROR`, SSL/protocol options).
 - **API layer:** `api_request`/`api_get`/`api_post` and object lookup/list helpers.
 - **Path translation:** `map_source_to_target_path()` maps source namespace under `SRC_ROOT_GROUP` to target `DST_ROOT_GROUP`.
 - **Git execution:** `run()` and `mirror_project()` perform actual clone/push operations and SSL env wiring for Git.
+- **Local mirror cache:** `ensure_local_mirror()` reuses valid bare repos and re-clones when a conflicting non-bare path exists.
 
 ## Key conventions in this codebase
 
@@ -47,3 +48,4 @@ Functional layers:
 - Existence checks are explicit 404-aware wrappers (`get_group_by_full_path`, `get_project_by_full_path`) returning `None` on not found.
 - Per-project failures are logged inside `migrate_group_recursive()` and only abort when `CONTINUE_ON_ERROR=false`.
 - Existing target projects are still mirrored when `PUSH_EXISTING_PROJECTS=true` (default), so behavior is not “create-only.”
+- Subgroup creation visibility is clamped by parent visibility to avoid invalid GitLab combinations (for example, public child under private parent).

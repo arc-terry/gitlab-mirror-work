@@ -2,7 +2,7 @@
 
 import os
 import sys
-import tempfile
+import shutil
 import subprocess
 import urllib.parse
 from typing import List, Optional, Tuple
@@ -54,6 +54,8 @@ SRC_SSH_PORT = os.environ.get("SRC_SSH_PORT")
 DST_SSH_PORT = os.environ.get("DST_SSH_PORT")
 
 GIT_SSL_CAINFO = os.environ.get("GIT_SSL_CAINFO")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOCAL_MIRROR_BASE = os.path.join(SCRIPT_DIR, "repositories_mirror-use")
 
 PUSH_EXISTING_PROJECTS = os.environ.get("PUSH_EXISTING_PROJECTS", "true").lower() in (
     "1",
@@ -180,6 +182,61 @@ def map_source_to_target_path(src_full_path: str) -> str:
 
     suffix = src_full_path[len(prefix):]
     return f"{DST_ROOT_GROUP}/{suffix}"
+
+
+VISIBILITY_RANK = {
+    "private": 0,
+    "internal": 1,
+    "public": 2,
+}
+
+
+def clamp_group_visibility(
+    requested_visibility: str,
+    parent_visibility: Optional[str],
+    group_full_path: str,
+) -> str:
+    requested = (requested_visibility or "private").lower()
+    parent = (parent_visibility or "").lower()
+
+    if parent not in VISIBILITY_RANK or requested not in VISIBILITY_RANK:
+        return requested
+
+    if VISIBILITY_RANK[requested] > VISIBILITY_RANK[parent]:
+        warn(
+            f"Clamp group visibility for {group_full_path}: "
+            f"{requested} -> {parent} (parent restriction)"
+        )
+        return parent
+
+    return requested
+
+
+def local_mirror_repo_path(src_full_path: str) -> str:
+    return os.path.join(LOCAL_MIRROR_BASE, f"{src_full_path}.git")
+
+
+def is_valid_bare_repo(path: str) -> bool:
+    if not os.path.isdir(path):
+        return False
+
+    probe = subprocess.run(
+        ["git", "rev-parse", "--is-bare-repository"],
+        cwd=path,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    return probe.returncode == 0 and probe.stdout.strip() == "true"
+
+
+def remove_conflicting_path(path: str):
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    else:
+        os.remove(path)
 
 
 # ============================================================
@@ -366,6 +423,7 @@ def preflight_report(src_root: dict):
     status("Target SSH port", DST_SSH_PORT or "(default)")
     status("Verify SSL", str(VERIFY_SSL))
     status("Git CA file", GIT_SSL_CAINFO or "(none)")
+    status("Local mirror cache", LOCAL_MIRROR_BASE)
     status("Dry run", str(DRY_RUN))
     status("Auto confirm", str(AUTO_CONFIRM))
     status("Push existing projects", str(PUSH_EXISTING_PROJECTS))
@@ -473,8 +531,9 @@ def preflight_report(src_root: dict):
     log("This script will:")
     log("  1. Create missing target groups/subgroups.")
     log("  2. Create missing empty target projects.")
-    log("  3. Run git clone --mirror from source.")
-    log("  4. Run git push --mirror to target.")
+    log("  3. Reuse or create local bare mirrors under repositories_mirror-use.")
+    log("  4. Run git fetch --prune to refresh local mirrors.")
+    log("  5. Run git push --mirror to target.")
     log("")
     warn("git push --mirror can overwrite or delete refs on the target repository.")
     warn("This is safest when target projects are new or empty.")
@@ -516,17 +575,23 @@ def create_group_if_missing(
         return existing
 
     parent_id = None
+    effective_visibility = visibility
 
     if parent_full_path:
         parent = get_group_by_full_path(DST_GITLAB, DST_TOKEN, parent_full_path)
         if not parent:
             raise RuntimeError(f"Parent group missing on target: {parent_full_path}")
         parent_id = parent["id"]
+        effective_visibility = clamp_group_visibility(
+            visibility,
+            parent.get("visibility"),
+            target_full_path,
+        )
 
     data = {
         "name": name,
         "path": path,
-        "visibility": visibility,
+        "visibility": effective_visibility,
     }
 
     if parent_id is not None:
@@ -561,6 +626,7 @@ def ensure_group_path(full_path: str, visibility: str = "private"):
             continue
 
         parent_id = None
+        parent_visibility = None
 
         if parent_path:
             parent = get_group_by_full_path(DST_GITLAB, DST_TOKEN, parent_path)
@@ -571,11 +637,18 @@ def ensure_group_path(full_path: str, visibility: str = "private"):
                     raise RuntimeError(f"Parent group missing on target: {parent_path}")
             else:
                 parent_id = parent["id"]
+                parent_visibility = parent.get("visibility")
+
+        effective_visibility = clamp_group_visibility(
+            visibility,
+            parent_visibility,
+            current,
+        )
 
         data = {
             "name": part,
             "path": part,
-            "visibility": visibility,
+            "visibility": effective_visibility,
         }
 
         if parent_id is not None:
@@ -646,6 +719,33 @@ def run(cmd: List[str], cwd: Optional[str] = None):
     subprocess.run(cmd, cwd=cwd, check=True, env=env)
 
 
+def ensure_local_mirror(src_full_path: str, src_url: str) -> str:
+    repo_dir = local_mirror_repo_path(src_full_path)
+    repo_parent = os.path.dirname(repo_dir)
+
+    if DRY_RUN:
+        log(f"[DRY-RUN] mkdir -p {repo_parent}")
+    else:
+        os.makedirs(repo_parent, exist_ok=True)
+
+    if os.path.exists(repo_dir):
+        if is_valid_bare_repo(repo_dir):
+            log(f"[CACHE REUSE] {repo_dir}")
+            run(["git", "remote", "set-url", "origin", src_url], cwd=repo_dir)
+            run(["git", "fetch", "--prune", "origin"], cwd=repo_dir)
+            return repo_dir
+
+        warn(f"Conflicting local path exists and is not bare repo: {repo_dir}")
+        if DRY_RUN:
+            log(f"[DRY-RUN] rm -rf {repo_dir}")
+        else:
+            remove_conflicting_path(repo_dir)
+
+    log(f"[CACHE CREATE] {repo_dir}")
+    run(["git", "clone", "--mirror", src_url, repo_dir])
+    return repo_dir
+
+
 def mirror_project(src_project: dict, dst_project_full_path: str):
     src_full_path = src_project["path_with_namespace"]
 
@@ -674,17 +774,9 @@ def mirror_project(src_project: dict, dst_project_full_path: str):
         DST_SSH_PORT,
     )
 
-    if DRY_RUN:
-        log(f"[DRY-RUN] git clone --mirror {safe_repo_url(SRC_GITLAB, src_full_path, SRC_GIT_PROTO, SRC_SSH_PORT)} repo.git")
-        log(f"[DRY-RUN] git push --mirror {safe_repo_url(DST_GITLAB, dst_project_full_path, DST_GIT_PROTO, DST_SSH_PORT)}")
-        return
-
-    with tempfile.TemporaryDirectory() as tmp:
-        repo_dir = os.path.join(tmp, "repo.git")
-
-        run(["git", "clone", "--mirror", src_url, repo_dir])
-        run(["git", "remote", "set-url", "--push", "origin", dst_url], cwd=repo_dir)
-        run(["git", "push", "--mirror"], cwd=repo_dir)
+    repo_dir = ensure_local_mirror(src_full_path, src_url)
+    run(["git", "remote", "set-url", "--push", "origin", dst_url], cwd=repo_dir)
+    run(["git", "push", "--mirror"], cwd=repo_dir)
 
     ok(f"Mirror completed: {dst_project_full_path}")
 
