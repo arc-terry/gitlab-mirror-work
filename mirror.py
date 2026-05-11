@@ -56,6 +56,7 @@ DST_SSH_PORT = os.environ.get("DST_SSH_PORT")
 GIT_SSL_CAINFO = os.environ.get("GIT_SSL_CAINFO")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_MIRROR_BASE = os.path.join(SCRIPT_DIR, "repositories_mirror-use")
+LASTLOG_PATH = os.path.join(SCRIPT_DIR, ".lastlog")
 
 PUSH_EXISTING_PROJECTS = os.environ.get("PUSH_EXISTING_PROJECTS", "true").lower() in (
     "1",
@@ -79,7 +80,15 @@ if not VERIFY_SSL:
 # ============================================================
 
 def log(msg: str):
-    print(msg, flush=True)
+    text = str(msg)
+    print(text, flush=True)
+    with open(LASTLOG_PATH, "a", encoding="utf-8") as f:
+        f.write(text + "\n")
+
+
+def init_lastlog():
+    with open(LASTLOG_PATH, "w", encoding="utf-8"):
+        pass
 
 
 def section(title: str):
@@ -423,6 +432,7 @@ def preflight_report(src_root: dict):
     status("Target SSH port", DST_SSH_PORT or "(default)")
     status("Verify SSL", str(VERIFY_SSL))
     status("Git CA file", GIT_SSL_CAINFO or "(none)")
+    status("Debug log file", LASTLOG_PATH)
     status("Local mirror cache", LOCAL_MIRROR_BASE)
     status("Dry run", str(DRY_RUN))
     status("Auto confirm", str(AUTO_CONFIRM))
@@ -837,6 +847,7 @@ def migrate_group_recursive(src_group: dict):
 
 
 def main():
+    init_lastlog()
     section("GitLab nested group mirror")
 
     src_root = get_group_by_full_path(SRC_GITLAB, SRC_TOKEN, SRC_ROOT_GROUP)
