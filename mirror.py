@@ -12,6 +12,9 @@ from typing import List, Optional, Tuple
 import requests
 import urllib3
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LAST_CONFIG_PATH = os.path.join(SCRIPT_DIR, ".lastconfig.env")
+
 HELP_TEXT = """
 GitLab nested group mirror
 
@@ -26,6 +29,7 @@ Required:
   SRC_TOKEN                   Source GitLab personal access token
   DST_TOKEN                   Target GitLab personal access token
   SRC_ROOT_GROUP              Source root group path to mirror
+  TARGET_DEV_BRANCH_PREFIX    Branch prefix to preserve (for example: arc-hsinchu), or NONE to disable
 
 Optional:
   DST_ROOT_GROUP              Target root group path (default: SRC_ROOT_GROUP)
@@ -37,11 +41,12 @@ Optional:
   SRC_SSH_PORT                Source SSH port
   DST_SSH_PORT                Target SSH port
   GIT_SSL_CAINFO              Custom CA file path
-  TARGET_DEV_BRANCH_PREFIX    Preserve target-only branches under this prefix (for example: arc-hsinchu)
   PUSH_EXISTING_PROJECTS      true|false (default: true)
   CONTINUE_ON_ERROR           true|false (default: true)
 
 Notes:
+  - If .lastconfig.env exists, values are loaded as defaults before env parsing.
+  - Current-run environment variables override .lastconfig.env values.
   - DRY_RUN=true prints planned changes and does not push.
   - In real run, non-preserved target ref deletions require confirmation unless AUTO_CONFIRM=true.
   - Latest run log is .lastlog; archive logs are written under log/.
@@ -50,6 +55,31 @@ Notes:
 if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
     print(HELP_TEXT.strip())
     sys.exit(0)
+
+
+def load_last_config_defaults():
+    if not os.path.exists(LAST_CONFIG_PATH):
+        return
+
+    with open(LAST_CONFIG_PATH, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key:
+                continue
+
+            if key in ("SRC_TOKEN", "DST_TOKEN"):
+                continue
+
+            if key not in os.environ:
+                os.environ[key] = value.strip()
+
+
+load_last_config_defaults()
 
 
 # ============================================================
@@ -64,6 +94,7 @@ DST_TOKEN = os.environ["DST_TOKEN"]
 
 SRC_ROOT_GROUP = os.environ["SRC_ROOT_GROUP"].strip("/")
 DST_ROOT_GROUP = os.environ.get("DST_ROOT_GROUP", SRC_ROOT_GROUP).strip("/")
+TARGET_DEV_BRANCH_PREFIX_RAW = os.environ.get("TARGET_DEV_BRANCH_PREFIX", "").strip()
 
 
 # ============================================================
@@ -95,7 +126,6 @@ SRC_SSH_PORT = os.environ.get("SRC_SSH_PORT")
 DST_SSH_PORT = os.environ.get("DST_SSH_PORT")
 
 GIT_SSL_CAINFO = os.environ.get("GIT_SSL_CAINFO")
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_MIRROR_BASE = os.path.join(SCRIPT_DIR, "repositories_mirror-use")
 LASTLOG_PATH = os.path.join(SCRIPT_DIR, ".lastlog")
 LOG_ARCHIVE_DIR = os.path.join(SCRIPT_DIR, "log")
@@ -112,12 +142,23 @@ CONTINUE_ON_ERROR = os.environ.get("CONTINUE_ON_ERROR", "true").lower() in (
     "yes",
 )
 
-TARGET_DEV_BRANCH_PREFIX = os.environ.get("TARGET_DEV_BRANCH_PREFIX", "").strip()
-if TARGET_DEV_BRANCH_PREFIX.startswith("refs/heads/"):
-    TARGET_DEV_BRANCH_PREFIX = TARGET_DEV_BRANCH_PREFIX[len("refs/heads/"):]
-TARGET_DEV_BRANCH_PREFIX = TARGET_DEV_BRANCH_PREFIX.strip("/")
-if not TARGET_DEV_BRANCH_PREFIX:
+if not TARGET_DEV_BRANCH_PREFIX_RAW:
+    raise RuntimeError(
+        "TARGET_DEV_BRANCH_PREFIX is required. Set a prefix such as "
+        "'arc-hsinchu' or use 'NONE' to disable preserve-prefix behavior."
+    )
+elif TARGET_DEV_BRANCH_PREFIX_RAW.upper() == "NONE":
     TARGET_DEV_BRANCH_PREFIX = None
+else:
+    TARGET_DEV_BRANCH_PREFIX = TARGET_DEV_BRANCH_PREFIX_RAW
+    if TARGET_DEV_BRANCH_PREFIX.startswith("refs/heads/"):
+        TARGET_DEV_BRANCH_PREFIX = TARGET_DEV_BRANCH_PREFIX[len("refs/heads/"):]
+    TARGET_DEV_BRANCH_PREFIX = TARGET_DEV_BRANCH_PREFIX.strip("/")
+    if not TARGET_DEV_BRANCH_PREFIX:
+        raise RuntimeError(
+            "TARGET_DEV_BRANCH_PREFIX is required. Set a prefix such as "
+            "'arc-hsinchu' or use 'NONE' to disable preserve-prefix behavior."
+        )
 
 
 if not VERIFY_SSL:
@@ -138,6 +179,42 @@ def log(msg: str):
 def init_lastlog():
     with open(LASTLOG_PATH, "w", encoding="utf-8"):
         pass
+
+
+def build_runtime_config_snapshot() -> List[Tuple[str, str]]:
+    target_prefix_for_snapshot = TARGET_DEV_BRANCH_PREFIX if TARGET_DEV_BRANCH_PREFIX else "NONE"
+
+    rows = [
+        ("SRC_GITLAB", SRC_GITLAB),
+        ("DST_GITLAB", DST_GITLAB),
+        ("SRC_ROOT_GROUP", SRC_ROOT_GROUP),
+        ("DST_ROOT_GROUP", DST_ROOT_GROUP),
+        ("VERIFY_SSL", "true" if VERIFY_SSL else "false"),
+        ("DRY_RUN", "true" if DRY_RUN else "false"),
+        ("AUTO_CONFIRM", "true" if AUTO_CONFIRM else "false"),
+        ("SRC_GIT_PROTO", SRC_GIT_PROTO),
+        ("DST_GIT_PROTO", DST_GIT_PROTO),
+        ("SRC_SSH_PORT", SRC_SSH_PORT or ""),
+        ("DST_SSH_PORT", DST_SSH_PORT or ""),
+        ("GIT_SSL_CAINFO", GIT_SSL_CAINFO or ""),
+        ("TARGET_DEV_BRANCH_PREFIX", target_prefix_for_snapshot),
+        ("PUSH_EXISTING_PROJECTS", "true" if PUSH_EXISTING_PROJECTS else "false"),
+        ("CONTINUE_ON_ERROR", "true" if CONTINUE_ON_ERROR else "false"),
+    ]
+
+    return rows
+
+
+def write_last_config_snapshot():
+    rows = build_runtime_config_snapshot()
+    tmp_path = f"{LAST_CONFIG_PATH}.tmp"
+
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write("# Latest mirror.py runtime configuration (tokens excluded)\n")
+        for key, value in rows:
+            f.write(f"{key}={value}\n")
+
+    os.replace(tmp_path, LAST_CONFIG_PATH)
 
 
 def log_type_tag() -> str:
@@ -511,10 +588,11 @@ def preflight_report(src_root: dict):
     status("Verify SSL", str(VERIFY_SSL))
     status("Git CA file", GIT_SSL_CAINFO or "(none)")
     status("Debug log file", LASTLOG_PATH)
+    status("Last config file", LAST_CONFIG_PATH)
     status("Archive log dir", LOG_ARCHIVE_DIR)
     status("Local mirror cache", LOCAL_MIRROR_BASE)
     status("Dry run", str(DRY_RUN))
-    status("Preserve branch prefix", TARGET_DEV_BRANCH_PREFIX or "(none)")
+    status("Preserve branch prefix", TARGET_DEV_BRANCH_PREFIX or "NONE")
     status("Auto confirm", str(AUTO_CONFIRM))
     status("Push existing projects", str(PUSH_EXISTING_PROJECTS))
     status("Continue on error", str(CONTINUE_ON_ERROR))
@@ -1197,6 +1275,7 @@ def migrate_group_recursive(src_group: dict):
 
 def main():
     init_lastlog()
+    write_last_config_snapshot()
     section("GitLab nested group mirror")
 
     src_root = get_group_by_full_path(SRC_GITLAB, SRC_TOKEN, SRC_ROOT_GROUP)

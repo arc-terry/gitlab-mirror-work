@@ -6,8 +6,11 @@ mirroring tool.
 ## Execution Flow
 
 ```
+startup
+ ├─ load_last_config_defaults()   load .lastconfig.env defaults (if exists)
 main()
- ├─ init_lastlog()            truncate .lastlog
+ ├─ init_lastlog()                truncate .lastlog
+ ├─ write_last_config_snapshot()  refresh .lastconfig.env (tokens excluded)
  ├─ preflight_report()
  │   ├─ verify source/target connectivity
  │   ├─ collect_source_tree()  recursive group/project discovery
@@ -108,7 +111,7 @@ The script ships with conservative defaults to prevent accidental damage:
 | `AUTO_CONFIRM`         | `false` | Prompt `Type YES` before real execution           |
 | `CONTINUE_ON_ERROR`    | `true`  | Log per-project failures, keep going              |
 | `PUSH_EXISTING_PROJECTS` | `true` | Re-push into existing target projects            |
-| `TARGET_DEV_BRANCH_PREFIX` | *(none)* | Preserve target-only branches under this prefix (`refs/heads/<prefix>/*`) |
+| `TARGET_DEV_BRANCH_PREFIX` | **required** | Preserve target-only branches under this prefix (`refs/heads/<prefix>/*`), or set `NONE` to disable |
 
 When `DRY_RUN=true`, `api_post` returns `None` and mutating git operations
 (`clone`, `fetch`, `push`) are skipped. Read-only `ls-remote` checks are used
@@ -124,6 +127,23 @@ candidates before push. If such refs exist:
 - with `AUTO_CONFIRM=true`: it auto-approves and logs that decision.
 
 If the prompt is rejected, that project's mirror push is skipped.
+
+## Runtime Configuration Snapshot
+
+The script maintains a latest runtime configuration snapshot at:
+
+- `.lastconfig.env` (repository root, `KEY=VALUE` format)
+
+Read/write behavior:
+
+1. On startup, if `.lastconfig.env` exists, values are loaded as defaults.
+2. Current-run environment variables override loaded defaults.
+3. After normalization/validation, the script overwrites `.lastconfig.env`
+   with the latest non-secret configuration.
+
+Secret handling:
+
+- `SRC_TOKEN` and `DST_TOKEN` are never loaded from or written to this file.
 
 ## History Rewrite Diagnostics
 

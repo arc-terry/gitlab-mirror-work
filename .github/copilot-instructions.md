@@ -21,7 +21,7 @@ There is no repository-defined “single test” command yet.
 `mirror.py` is an end-to-end GitLab group migration tool that mirrors nested groups and projects from a source GitLab to a target GitLab.
 
 Core flow in `main()`:
-1. Read required/optional environment variables at module import time.
+1. Load `.lastconfig.env` defaults, then read required/optional environment variables at module import time.
 2. Run `preflight_report()`:
    - verify source/target connectivity and permissions,
    - recursively discover all source groups/projects via `collect_source_tree()`,
@@ -31,7 +31,8 @@ Core flow in `main()`:
 5. Recurse through source groups (`migrate_group_recursive()`):
    - create missing target groups/projects through GitLab API,
    - mirror each project via persistent local bare cache under `repositories_mirror-use` (`git fetch --prune` + `git push --mirror`).
-6. Write run logs to repository-root `.lastlog` (refreshed/truncated at each script start).
+6. Write latest runtime config snapshot to repository-root `.lastconfig.env` (tokens excluded).
+7. Write run logs to repository-root `.lastlog` (refreshed/truncated at each script start).
 
 Functional layers:
 - **Config + behavior flags:** top-level env parsing (`DRY_RUN`, `AUTO_CONFIRM`, `PUSH_EXISTING_PROJECTS`, `CONTINUE_ON_ERROR`, SSL/protocol options).
@@ -39,11 +40,13 @@ Functional layers:
 - **Path translation:** `map_source_to_target_path()` maps source namespace under `SRC_ROOT_GROUP` to target `DST_ROOT_GROUP`.
 - **Git execution:** `run()` and `mirror_project()` perform actual clone/push operations and SSL env wiring for Git.
 - **Local mirror cache:** `ensure_local_mirror()` reuses valid bare repos and re-clones when a conflicting non-bare path exists.
+- **Config persistence:** `.lastconfig.env` stores latest non-secret runtime config and is loaded as defaults on next run.
 - **Log persistence:** `init_lastlog()` truncates `.lastlog` each run; `log()` writes to both stdout and `.lastlog`.
 
 ## Key conventions in this codebase
 
-- Required env vars are accessed with `os.environ[...]` at import time. Missing values fail immediately before `main()` runs.
+- Required env vars are resolved at import time after `.lastconfig.env` defaults are loaded.
+- `TARGET_DEV_BRANCH_PREFIX` is required: use real prefix to enable preserve-prefix behavior, or `NONE` to disable.
 - Safety defaults are intentional: `DRY_RUN=true`, `AUTO_CONFIRM=false`.
 - All source→target namespace mapping must go through `map_source_to_target_path()`; do not hand-build target paths.
 - GitLab listing is page-aware only through `api_get()` (follows `resp.links["next"]`). Reuse it for list endpoints.
@@ -52,6 +55,7 @@ Functional layers:
 - Existing target projects are still mirrored when `PUSH_EXISTING_PROJECTS=true` (default), so behavior is not “create-only.”
 - Subgroup creation visibility is clamped by parent visibility to avoid invalid GitLab combinations (for example, public child under private parent).
 - `.lastlog` lives at repository root and always contains the latest execution output (not cumulative history).
+- `.lastconfig.env` lives at repository root and contains latest non-secret config only (never tokens).
 
 ## Development discussion records policy
 

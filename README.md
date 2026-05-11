@@ -31,6 +31,7 @@ requiring the runtime variables to be set.
 | `SRC_TOKEN`      | Source GitLab personal access token   |
 | `DST_TOKEN`      | Target GitLab personal access token   |
 | `SRC_ROOT_GROUP` | Source root group path to mirror      |
+| `TARGET_DEV_BRANCH_PREFIX` | Preserved target branch prefix (for example `arc-hsinchu`) or `NONE` |
 
 **Optional:**
 
@@ -45,7 +46,6 @@ requiring the runtime variables to be set.
 | `SRC_SSH_PORT`         | *(default)* | Custom SSH port for source             |
 | `DST_SSH_PORT`         | *(default)* | Custom SSH port for target             |
 | `GIT_SSL_CAINFO`       | *(none)*  | Path to custom CA bundle                 |
-| `TARGET_DEV_BRANCH_PREFIX` | *(none)* | Keep target-only branches under this prefix (example: `arc-hsinchu`) |
 | `PUSH_EXISTING_PROJECTS` | `true`  | Re-push into existing target projects    |
 | `CONTINUE_ON_ERROR`    | `true`    | Keep going on per-project failures       |
 
@@ -60,13 +60,20 @@ SRC_ROOT_GROUP=company/engineering \
 python3 mirror.py
 ```
 
+The script auto-loads defaults from `.lastconfig.env` (if present), then applies
+current environment variables on top.
+
+`TARGET_DEV_BRANCH_PREFIX` is required after merge. Set either:
+- a prefix (for example `arc-hsinchu`) to preserve `arc-hsinchu/*` branches, or
+- `NONE` to disable prefix-preserve behavior.
+
 The script runs in **dry-run mode by default** — no changes are made until
 you set `DRY_RUN=false`.
 
 Each run writes the latest output to `.lastlog` and archives it to `log/`
 as `<mmddyyyy>_<HHMMSS>_<RUN|DRYRUN>.log` (local system time).
 
-When `TARGET_DEV_BRANCH_PREFIX` is set, target-only branches under
+When `TARGET_DEV_BRANCH_PREFIX` is a real prefix, target-only branches under
 `<prefix>/*` are preserved and not deleted by mirror push.
 
 ## Practical Examples
@@ -143,6 +150,12 @@ If you maintain target-only branches (for example `arc-hsinchu/*`), set:
 
 ```bash
 TARGET_DEV_BRANCH_PREFIX=arc-hsinchu
+```
+
+To disable this feature explicitly, set:
+
+```bash
+TARGET_DEV_BRANCH_PREFIX=NONE
 ```
 
 Behavior:
