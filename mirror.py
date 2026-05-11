@@ -3,8 +3,10 @@
 import os
 import sys
 import shutil
+import shlex
 import subprocess
 import urllib.parse
+from datetime import datetime
 from typing import List, Optional, Tuple
 
 import requests
@@ -57,6 +59,7 @@ GIT_SSL_CAINFO = os.environ.get("GIT_SSL_CAINFO")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_MIRROR_BASE = os.path.join(SCRIPT_DIR, "repositories_mirror-use")
 LASTLOG_PATH = os.path.join(SCRIPT_DIR, ".lastlog")
+LOG_ARCHIVE_DIR = os.path.join(SCRIPT_DIR, "log")
 
 PUSH_EXISTING_PROJECTS = os.environ.get("PUSH_EXISTING_PROJECTS", "true").lower() in (
     "1",
@@ -89,6 +92,35 @@ def log(msg: str):
 def init_lastlog():
     with open(LASTLOG_PATH, "w", encoding="utf-8"):
         pass
+
+
+def log_type_tag() -> str:
+    return "DRYRUN" if DRY_RUN else "RUN"
+
+
+def build_archive_log_path(stamp: str, sequence: int = 0) -> str:
+    filename = f"{stamp}_{log_type_tag()}.log"
+    if sequence > 0:
+        filename = f"{stamp}_{log_type_tag()}_{sequence}.log"
+    return os.path.join(LOG_ARCHIVE_DIR, filename)
+
+
+def archive_lastlog() -> str:
+    if not os.path.exists(LASTLOG_PATH):
+        raise RuntimeError(f"Latest log file does not exist: {LASTLOG_PATH}")
+
+    os.makedirs(LOG_ARCHIVE_DIR, exist_ok=True)
+
+    stamp = datetime.now().strftime("%m%d%Y_%H%M%S")
+    archive_path = build_archive_log_path(stamp)
+
+    seq = 1
+    while os.path.exists(archive_path):
+        archive_path = build_archive_log_path(stamp, seq)
+        seq += 1
+
+    shutil.copy2(LASTLOG_PATH, archive_path)
+    return archive_path
 
 
 def section(title: str):
@@ -433,6 +465,7 @@ def preflight_report(src_root: dict):
     status("Verify SSL", str(VERIFY_SSL))
     status("Git CA file", GIT_SSL_CAINFO or "(none)")
     status("Debug log file", LASTLOG_PATH)
+    status("Archive log dir", LOG_ARCHIVE_DIR)
     status("Local mirror cache", LOCAL_MIRROR_BASE)
     status("Dry run", str(DRY_RUN))
     status("Auto confirm", str(AUTO_CONFIRM))
@@ -713,12 +746,7 @@ def create_project_if_missing(
 # Git operation helpers
 # ============================================================
 
-def run(cmd: List[str], cwd: Optional[str] = None):
-    log(f"+ {' '.join(cmd)}")
-
-    if DRY_RUN:
-        return
-
+def git_command_env() -> dict:
     env = os.environ.copy()
 
     if GIT_SSL_CAINFO:
@@ -726,7 +754,181 @@ def run(cmd: List[str], cwd: Optional[str] = None):
     elif not VERIFY_SSL:
         env["GIT_SSL_NO_VERIFY"] = "true"
 
-    subprocess.run(cmd, cwd=cwd, check=True, env=env)
+    return env
+
+
+def parse_ls_remote_refs(output: str) -> dict:
+    refs = {}
+
+    for line in output.splitlines():
+        if "\t" not in line:
+            continue
+
+        sha, ref_name = line.split("\t", 1)
+        if not ref_name.startswith("refs/"):
+            continue
+
+        refs[ref_name] = sha
+
+    return refs
+
+
+def ls_remote_refs(url: str, side: str) -> dict:
+    cmd = ["git", "ls-remote", "--refs", url]
+    proc = subprocess.run(
+        cmd,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=git_command_env(),
+    )
+
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        raise RuntimeError(
+            f"Failed to list {side} refs via git ls-remote (exit={proc.returncode}): {stderr}"
+        )
+
+    return parse_ls_remote_refs(proc.stdout)
+
+
+def classify_ref_diff(source_refs: dict, target_refs: dict) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str, str]], List[Tuple[str, str]]]:
+    to_create = []
+    to_update = []
+    to_delete = []
+
+    for ref_name, source_sha in source_refs.items():
+        target_sha = target_refs.get(ref_name)
+        if target_sha is None:
+            to_create.append((ref_name, source_sha))
+            continue
+
+        if target_sha != source_sha:
+            to_update.append((ref_name, target_sha, source_sha))
+
+    for ref_name, target_sha in target_refs.items():
+        if ref_name not in source_refs:
+            to_delete.append((ref_name, target_sha))
+
+    to_create.sort(key=lambda row: row[0])
+    to_update.sort(key=lambda row: row[0])
+    to_delete.sort(key=lambda row: row[0])
+    return to_create, to_update, to_delete
+
+
+def log_dry_run_ref_diff(
+    dst_project_full_path: str,
+    source_refs: dict,
+    target_refs: dict,
+):
+    to_create, to_update, to_delete = classify_ref_diff(source_refs, target_refs)
+
+    log("[DRY-RUN] Refs not yet mirrored (source -> target)")
+    status("Project", dst_project_full_path)
+    status("Source refs", str(len(source_refs)))
+    status("Target refs", str(len(target_refs)))
+    status("Refs to create", str(len(to_create)))
+    status("Refs to update", str(len(to_update)))
+    status("Refs to delete", str(len(to_delete)))
+
+    if not to_create and not to_update and not to_delete:
+        ok("Dry-run diff: target is already in sync with source refs.")
+        return
+
+    if to_create:
+        log("")
+        log("Refs to create:")
+        for ref_name, source_sha in to_create:
+            log(f"  + {ref_name} {source_sha}")
+
+    if to_update:
+        log("")
+        log("Refs to update:")
+        for ref_name, target_sha, source_sha in to_update:
+            log(f"  ~ {ref_name} {target_sha} -> {source_sha}")
+
+    if to_delete:
+        log("")
+        log("Refs to delete:")
+        for ref_name, target_sha in to_delete:
+            log(f"  - {ref_name} {target_sha}")
+
+
+def is_history_rewrite_issue(output: str) -> bool:
+    lowered = output.lower()
+    markers = [
+        "non-fast-forward",
+        "pre-receive hook declined",
+        "protected branch hook declined",
+        "protected tag",
+        "remote rejected",
+        "cannot force update",
+        "deny deleting",
+        "deletion prohibited",
+        "fetch first",
+    ]
+    return any(marker in lowered for marker in markers)
+
+
+def log_history_rewrite_diagnostics(repo_dir: str, safe_dst_url: str):
+    repo_arg = shlex.quote(repo_dir)
+    url_arg = shlex.quote(safe_dst_url)
+
+    log("")
+    warn("Potential history rewrite / ref-protection issue detected.")
+    log("Symptom:")
+    log("  - git push --mirror was rejected while updating or deleting refs.")
+    log("Likely reasons:")
+    log("  - Protected branches/tags block force-push or ref deletion.")
+    log("  - Server-side hooks reject rewritten history.")
+    log("  - Target refs diverged and policy forbids overwrite.")
+    log("  - Credentials do not allow force-update/delete operations.")
+    log("Debug commands:")
+    log(f"  git -C {repo_arg} show-ref --head | sort")
+    log(f"  git ls-remote --refs {url_arg} | sort")
+    log(f"  git -C {repo_arg} push --mirror --verbose")
+
+
+def run_push_mirror_with_diagnostics(repo_dir: str, safe_dst_url: str):
+    cmd = ["git", "push", "--mirror"]
+    log(f"+ {' '.join(cmd)}")
+
+    proc = subprocess.run(
+        cmd,
+        cwd=repo_dir,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=git_command_env(),
+    )
+
+    if proc.stdout:
+        for line in proc.stdout.splitlines():
+            log(line)
+
+    if proc.stderr:
+        for line in proc.stderr.splitlines():
+            log(line)
+
+    if proc.returncode == 0:
+        return
+
+    merged_output = "\n".join(part for part in [proc.stdout, proc.stderr] if part).strip()
+    if is_history_rewrite_issue(merged_output):
+        log_history_rewrite_diagnostics(repo_dir, safe_dst_url)
+
+    raise RuntimeError(f"git push --mirror failed with exit code {proc.returncode}")
+
+
+def run(cmd: List[str], cwd: Optional[str] = None):
+    log(f"+ {' '.join(cmd)}")
+
+    if DRY_RUN:
+        return
+
+    subprocess.run(cmd, cwd=cwd, check=True, env=git_command_env())
 
 
 def ensure_local_mirror(src_full_path: str, src_url: str) -> str:
@@ -756,7 +958,7 @@ def ensure_local_mirror(src_full_path: str, src_url: str) -> str:
     return repo_dir
 
 
-def mirror_project(src_project: dict, dst_project_full_path: str):
+def mirror_project(src_project: dict, dst_project_full_path: str, target_created_now: bool):
     src_full_path = src_project["path_with_namespace"]
 
     log("")
@@ -764,8 +966,10 @@ def mirror_project(src_project: dict, dst_project_full_path: str):
     log(f"[MIRROR PROJECT]")
     status("Source", src_full_path)
     status("Target", dst_project_full_path)
-    status("Source URL", safe_repo_url(SRC_GITLAB, src_full_path, SRC_GIT_PROTO, SRC_SSH_PORT))
-    status("Target URL", safe_repo_url(DST_GITLAB, dst_project_full_path, DST_GIT_PROTO, DST_SSH_PORT))
+    safe_src_url = safe_repo_url(SRC_GITLAB, src_full_path, SRC_GIT_PROTO, SRC_SSH_PORT)
+    safe_dst_url = safe_repo_url(DST_GITLAB, dst_project_full_path, DST_GIT_PROTO, DST_SSH_PORT)
+    status("Source URL", safe_src_url)
+    status("Target URL", safe_dst_url)
     log("-" * 72)
 
     src_url = repo_url(
@@ -784,9 +988,21 @@ def mirror_project(src_project: dict, dst_project_full_path: str):
         DST_SSH_PORT,
     )
 
+    if DRY_RUN:
+        source_refs = ls_remote_refs(src_url, "source")
+        target_refs = {}
+
+        if target_created_now:
+            log("[DRY-RUN] Target project will be created; all source refs are pending mirror.")
+        else:
+            target_refs = ls_remote_refs(dst_url, "target")
+
+        log_dry_run_ref_diff(dst_project_full_path, source_refs, target_refs)
+        return
+
     repo_dir = ensure_local_mirror(src_full_path, src_url)
     run(["git", "remote", "set-url", "--push", "origin", dst_url], cwd=repo_dir)
-    run(["git", "push", "--mirror"], cwd=repo_dir)
+    run_push_mirror_with_diagnostics(repo_dir, safe_dst_url)
 
     ok(f"Mirror completed: {dst_project_full_path}")
 
@@ -829,7 +1045,7 @@ def migrate_group_recursive(src_group: dict):
             )
 
             if created_now or PUSH_EXISTING_PROJECTS:
-                mirror_project(project, dst_project_full_path)
+                mirror_project(project, dst_project_full_path, created_now)
             else:
                 log(f"[SKIP PUSH EXISTING PROJECT] {dst_project_full_path}")
 
@@ -872,11 +1088,23 @@ def main():
 
 
 if __name__ == "__main__":
+    exit_code = 0
+
     try:
         main()
     except KeyboardInterrupt:
         log("[INTERRUPTED]")
-        sys.exit(130)
+        exit_code = 130
     except Exception as e:
         log(f"[FATAL] {e}")
-        sys.exit(1)
+        exit_code = 1
+    finally:
+        try:
+            archive_path = archive_lastlog()
+            status("Archived log file", archive_path)
+        except Exception as e:
+            warn(f"Failed to archive execution log: {e}")
+            if exit_code == 0:
+                exit_code = 1
+
+    sys.exit(exit_code)

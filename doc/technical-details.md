@@ -71,6 +71,21 @@ under `repositories_mirror-use/`.
 
 3. **Push** → `git push --mirror` to the target GitLab.
 
+### Dry-run ref-diff report
+
+When `DRY_RUN=true`, project mirroring switches to a read-only comparison mode:
+
+1. Read source refs via `git ls-remote --refs <source_url>`
+2. Read target refs via `git ls-remote --refs <target_url>`
+   - If the target project is planned for creation, target refs are treated as empty.
+3. Classify differences:
+   - **to-create**: ref exists only in source
+   - **to-update**: ref exists on both sides with different SHA
+   - **to-delete**: ref exists only in target (would be removed by `push --mirror`)
+
+The script logs summary counts and full per-category ref lists, so dry-run shows
+exactly what is not yet mirrored.
+
 ### URL construction
 
 | Protocol | Format                                                |
@@ -86,13 +101,35 @@ The script ships with conservative defaults to prevent accidental damage:
 
 | Flag                   | Default | Effect                                           |
 |------------------------|---------|--------------------------------------------------|
-| `DRY_RUN`              | `true`  | No API writes, no git push — log only            |
+| `DRY_RUN`              | `true`  | No API writes/push; run read-only ref diff checks |
 | `AUTO_CONFIRM`         | `false` | Prompt `Type YES` before real execution           |
 | `CONTINUE_ON_ERROR`    | `true`  | Log per-project failures, keep going              |
 | `PUSH_EXISTING_PROJECTS` | `true` | Re-push into existing target projects            |
 
-When `DRY_RUN=true`, `api_post` returns `None` and git commands are logged
-but not executed.
+When `DRY_RUN=true`, `api_post` returns `None` and mutating git operations
+(`clone`, `fetch`, `push`) are skipped. Read-only `ls-remote` checks are used
+to produce the pending-change report.
+
+## History Rewrite Diagnostics
+
+`git push --mirror` is executed through a dedicated wrapper that captures stdout
+and stderr. On failure, the output is scanned for rewrite/protection markers
+such as:
+
+- `non-fast-forward`
+- `pre-receive hook declined`
+- `protected branch hook declined`
+- `remote rejected`
+- `deny deleting` / deletion-prohibited style messages
+
+When detected, the script prints:
+
+- a symptom summary,
+- likely causes (protected refs, server hooks, policy, permissions),
+- debug commands:
+  - `git -C <local-mirror> show-ref --head | sort`
+  - `git ls-remote --refs <target-url> | sort`
+  - `git -C <local-mirror> push --mirror --verbose`
 
 ## Visibility Clamping
 
@@ -128,11 +165,19 @@ new objects (`git fetch --prune`) instead of full re-clones.
 
 - `init_lastlog()` truncates `.lastlog` at the start of every run.
 - `log()` dual-writes each message to stdout and `.lastlog`.
+- `archive_lastlog()` copies `.lastlog` to `log/` after execution (success or failure).
 - Specialized helpers (`section`, `status`, `warn`, `ok`, `fail`) format
   output consistently.
 
-`.lastlog` always contains only the latest run output, not cumulative
-history.
+Runtime log files:
+
+| Path / Pattern | Meaning |
+|----------------|---------|
+| `.lastlog` | Latest run output only (refreshed each run) |
+| `log/<mmddyyyy>_<HHMMSS>_<RUN|DRYRUN>.log` | Archived per-run snapshot (local system time) |
+
+If the same archive filename already exists in the same second, the script
+adds a numeric suffix (`_1`, `_2`, ...) to avoid overwrite.
 
 ## Path Translation
 

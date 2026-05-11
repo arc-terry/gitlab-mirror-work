@@ -53,6 +53,9 @@ python3 mirror.py
 The script runs in **dry-run mode by default** — no changes are made until
 you set `DRY_RUN=false`.
 
+Each run writes the latest output to `.lastlog` and archives it to `log/`
+as `<mmddyyyy>_<HHMMSS>_<RUN|DRYRUN>.log` (local system time).
+
 ## Practical Examples
 
 ### Dry-run preview
@@ -67,6 +70,9 @@ DST_TOKEN=glpat-yyyy \
 SRC_ROOT_GROUP=org/platform \
 python3 mirror.py
 ```
+
+Dry-run now prints a per-project ref diff report (`refs to create`, `refs to update`,
+`refs to delete`) so you can see exactly what is not yet mirrored.
 
 ### Full mirror execution
 
@@ -108,6 +114,15 @@ python3 mirror.py
 Simply run the same command again. The local bare cache under
 `repositories_mirror-use/` is reused — only new objects are fetched
 before pushing to the target.
+
+### History rewrite rejection troubleshooting
+
+If `git push --mirror` is rejected due to rewritten history or ref protection,
+the tool now prints:
+
+- symptom summary,
+- likely causes (protected refs, hooks, policy restrictions, permission gaps),
+- debug commands to inspect local and target refs in detail.
 
 ## Background
 
