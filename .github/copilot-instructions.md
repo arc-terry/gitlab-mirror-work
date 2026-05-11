@@ -52,3 +52,28 @@ Functional layers:
 - Existing target projects are still mirrored when `PUSH_EXISTING_PROJECTS=true` (default), so behavior is not “create-only.”
 - Subgroup creation visibility is clamped by parent visibility to avoid invalid GitLab combinations (for example, public child under private parent).
 - `.lastlog` lives at repository root and always contains the latest execution output (not cumulative history).
+
+## Development discussion records policy
+
+- Track development discussions under `doc/dev/` with filename format:
+  - `doc/dev/<status>_<topic>.md`
+- Allowed `<status>` values:
+  - `todo`
+  - `planning`
+  - `developing`
+  - `finished`
+  - `pending`
+- `<topic>` must be a lowercase hyphenated slug that reflects the user question.
+- When status changes, rename the file to the new status prefix (for example, `planning_x.md` -> `developing_x.md`).
+- Each discussion record should contain:
+  - question/topic summary
+  - decisions
+  - pros/cons or tradeoffs
+  - implementation next steps (if any)
+
+### Pending implementation hint behavior
+
+- At the start of every new user request, check for:
+  - `doc/dev/planning_*.md`
+  - `doc/dev/developing_*.md`
+- If any exist, add a concise reminder that implementation tasks are still pending.

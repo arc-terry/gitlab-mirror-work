@@ -69,7 +69,9 @@ under `repositories_mirror-use/`.
 
 2. **Set push target** → `git remote set-url --push origin <target_url>`.
 
-3. **Push** → `git push --mirror` to the target GitLab.
+3. **Preserve optional target prefix refs** (if configured):
+   - fetch `refs/heads/<TARGET_DEV_BRANCH_PREFIX>/*` from target into local mirror.
+4. **Push** → `git push --mirror` to the target GitLab.
 
 ### Dry-run ref-diff report
 
@@ -81,7 +83,8 @@ When `DRY_RUN=true`, project mirroring switches to a read-only comparison mode:
 3. Classify differences:
    - **to-create**: ref exists only in source
    - **to-update**: ref exists on both sides with different SHA
-   - **to-delete**: ref exists only in target (would be removed by `push --mirror`)
+   - **to-delete**: target-only ref not under preserved prefix
+   - **preserved-target-only**: target-only ref under `refs/heads/<TARGET_DEV_BRANCH_PREFIX>/*`
 
 The script logs summary counts and full per-category ref lists, so dry-run shows
 exactly what is not yet mirrored.
@@ -105,10 +108,22 @@ The script ships with conservative defaults to prevent accidental damage:
 | `AUTO_CONFIRM`         | `false` | Prompt `Type YES` before real execution           |
 | `CONTINUE_ON_ERROR`    | `true`  | Log per-project failures, keep going              |
 | `PUSH_EXISTING_PROJECTS` | `true` | Re-push into existing target projects            |
+| `TARGET_DEV_BRANCH_PREFIX` | *(none)* | Preserve target-only branches under this prefix (`refs/heads/<prefix>/*`) |
 
 When `DRY_RUN=true`, `api_post` returns `None` and mutating git operations
 (`clone`, `fetch`, `push`) are skipped. Read-only `ls-remote` checks are used
 to produce the pending-change report.
+
+## Deletion Confirmation Gate
+
+In real mode (`DRY_RUN=false`), the script computes non-preserved delete
+candidates before push. If such refs exist:
+
+- with `AUTO_CONFIRM=false`: it prompts
+  `Delete <N> non-preserved target refs? [y/N]`
+- with `AUTO_CONFIRM=true`: it auto-approves and logs that decision.
+
+If the prompt is rejected, that project's mirror push is skipped.
 
 ## History Rewrite Diagnostics
 

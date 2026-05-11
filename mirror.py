@@ -12,6 +12,45 @@ from typing import List, Optional, Tuple
 import requests
 import urllib3
 
+HELP_TEXT = """
+GitLab nested group mirror
+
+Usage:
+  python3 mirror.py [--help|-h]
+
+This tool is configured by environment variables.
+
+Required:
+  SRC_GITLAB                  Source GitLab base URL
+  DST_GITLAB                  Target GitLab base URL
+  SRC_TOKEN                   Source GitLab personal access token
+  DST_TOKEN                   Target GitLab personal access token
+  SRC_ROOT_GROUP              Source root group path to mirror
+
+Optional:
+  DST_ROOT_GROUP              Target root group path (default: SRC_ROOT_GROUP)
+  DRY_RUN                     true|false (default: true)
+  AUTO_CONFIRM                true|false (default: false)
+  VERIFY_SSL                  true|false (default: true)
+  SRC_GIT_PROTO               https|ssh (default: https)
+  DST_GIT_PROTO               https|ssh (default: ssh)
+  SRC_SSH_PORT                Source SSH port
+  DST_SSH_PORT                Target SSH port
+  GIT_SSL_CAINFO              Custom CA file path
+  TARGET_DEV_BRANCH_PREFIX    Preserve target-only branches under this prefix (for example: arc-hsinchu)
+  PUSH_EXISTING_PROJECTS      true|false (default: true)
+  CONTINUE_ON_ERROR           true|false (default: true)
+
+Notes:
+  - DRY_RUN=true prints planned changes and does not push.
+  - In real run, non-preserved target ref deletions require confirmation unless AUTO_CONFIRM=true.
+  - Latest run log is .lastlog; archive logs are written under log/.
+"""
+
+if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+    print(HELP_TEXT.strip())
+    sys.exit(0)
+
 
 # ============================================================
 # Required environment variables
@@ -72,6 +111,13 @@ CONTINUE_ON_ERROR = os.environ.get("CONTINUE_ON_ERROR", "true").lower() in (
     "true",
     "yes",
 )
+
+TARGET_DEV_BRANCH_PREFIX = os.environ.get("TARGET_DEV_BRANCH_PREFIX", "").strip()
+if TARGET_DEV_BRANCH_PREFIX.startswith("refs/heads/"):
+    TARGET_DEV_BRANCH_PREFIX = TARGET_DEV_BRANCH_PREFIX[len("refs/heads/"):]
+TARGET_DEV_BRANCH_PREFIX = TARGET_DEV_BRANCH_PREFIX.strip("/")
+if not TARGET_DEV_BRANCH_PREFIX:
+    TARGET_DEV_BRANCH_PREFIX = None
 
 
 if not VERIFY_SSL:
@@ -468,6 +514,7 @@ def preflight_report(src_root: dict):
     status("Archive log dir", LOG_ARCHIVE_DIR)
     status("Local mirror cache", LOCAL_MIRROR_BASE)
     status("Dry run", str(DRY_RUN))
+    status("Preserve branch prefix", TARGET_DEV_BRANCH_PREFIX or "(none)")
     status("Auto confirm", str(AUTO_CONFIRM))
     status("Push existing projects", str(PUSH_EXISTING_PROJECTS))
     status("Continue on error", str(CONTINUE_ON_ERROR))
@@ -793,10 +840,30 @@ def ls_remote_refs(url: str, side: str) -> dict:
     return parse_ls_remote_refs(proc.stdout)
 
 
-def classify_ref_diff(source_refs: dict, target_refs: dict) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str, str]], List[Tuple[str, str]]]:
+def preserved_target_ref_prefix() -> Optional[str]:
+    if not TARGET_DEV_BRANCH_PREFIX:
+        return None
+    return f"refs/heads/{TARGET_DEV_BRANCH_PREFIX}/"
+
+
+def is_preserved_target_ref(ref_name: str) -> bool:
+    prefix = preserved_target_ref_prefix()
+    return bool(prefix and ref_name.startswith(prefix))
+
+
+def classify_ref_diff(
+    source_refs: dict,
+    target_refs: dict,
+) -> Tuple[
+    List[Tuple[str, str]],
+    List[Tuple[str, str, str]],
+    List[Tuple[str, str]],
+    List[Tuple[str, str]],
+]:
     to_create = []
     to_update = []
     to_delete = []
+    preserved_target_only = []
 
     for ref_name, source_sha in source_refs.items():
         target_sha = target_refs.get(ref_name)
@@ -809,12 +876,16 @@ def classify_ref_diff(source_refs: dict, target_refs: dict) -> Tuple[List[Tuple[
 
     for ref_name, target_sha in target_refs.items():
         if ref_name not in source_refs:
+            if is_preserved_target_ref(ref_name):
+                preserved_target_only.append((ref_name, target_sha))
+                continue
             to_delete.append((ref_name, target_sha))
 
     to_create.sort(key=lambda row: row[0])
     to_update.sort(key=lambda row: row[0])
     to_delete.sort(key=lambda row: row[0])
-    return to_create, to_update, to_delete
+    preserved_target_only.sort(key=lambda row: row[0])
+    return to_create, to_update, to_delete, preserved_target_only
 
 
 def log_dry_run_ref_diff(
@@ -822,7 +893,7 @@ def log_dry_run_ref_diff(
     source_refs: dict,
     target_refs: dict,
 ):
-    to_create, to_update, to_delete = classify_ref_diff(source_refs, target_refs)
+    to_create, to_update, to_delete, preserved_target_only = classify_ref_diff(source_refs, target_refs)
 
     log("[DRY-RUN] Refs not yet mirrored (source -> target)")
     status("Project", dst_project_full_path)
@@ -831,10 +902,14 @@ def log_dry_run_ref_diff(
     status("Refs to create", str(len(to_create)))
     status("Refs to update", str(len(to_update)))
     status("Refs to delete", str(len(to_delete)))
+    status("Preserved refs", str(len(preserved_target_only)))
 
-    if not to_create and not to_update and not to_delete:
+    if not to_create and not to_update and not to_delete and not preserved_target_only:
         ok("Dry-run diff: target is already in sync with source refs.")
         return
+
+    if not to_create and not to_update and not to_delete and preserved_target_only:
+        ok("Dry-run diff: only preserved target refs differ and will be kept.")
 
     if to_create:
         log("")
@@ -853,6 +928,12 @@ def log_dry_run_ref_diff(
         log("Refs to delete:")
         for ref_name, target_sha in to_delete:
             log(f"  - {ref_name} {target_sha}")
+
+    if preserved_target_only:
+        log("")
+        log("Preserved target-only refs (kept):")
+        for ref_name, target_sha in preserved_target_only:
+            log(f"  = {ref_name} {target_sha}")
 
 
 def is_history_rewrite_issue(output: str) -> bool:
@@ -931,6 +1012,49 @@ def run(cmd: List[str], cwd: Optional[str] = None):
     subprocess.run(cmd, cwd=cwd, check=True, env=git_command_env())
 
 
+def confirm_non_preserved_deletions(
+    dst_project_full_path: str,
+    to_delete: List[Tuple[str, str]],
+) -> bool:
+    if not to_delete:
+        return True
+
+    log("")
+    warn("Non-preserved target refs will be deleted by mirror push.")
+    status("Project", dst_project_full_path)
+    status("Delete candidates", str(len(to_delete)))
+    for ref_name, target_sha in to_delete:
+        log(f"  - {ref_name} {target_sha}")
+
+    if AUTO_CONFIRM:
+        ok("AUTO_CONFIRM=true, deletion confirmation auto-approved.")
+        return True
+
+    answer = input(f"Delete {len(to_delete)} non-preserved target refs? [y/N]: ").strip().lower()
+    if answer in ("y", "yes"):
+        ok("Deletion confirmed by user.")
+        return True
+
+    warn("Deletion not confirmed; skip mirror push for this project.")
+    return False
+
+
+def preserve_target_only_refs_in_local_mirror(
+    repo_dir: str,
+    dst_url: str,
+    preserved_target_only: List[Tuple[str, str]],
+):
+    if not TARGET_DEV_BRANCH_PREFIX or not preserved_target_only:
+        return
+
+    refspec = (
+        f"+refs/heads/{TARGET_DEV_BRANCH_PREFIX}/*:"
+        f"refs/heads/{TARGET_DEV_BRANCH_PREFIX}/*"
+    )
+    log(f"[PRESERVE PREFIX] refs/heads/{TARGET_DEV_BRANCH_PREFIX}/*")
+    run(["git", "fetch", dst_url, refspec], cwd=repo_dir)
+
+
 def ensure_local_mirror(src_full_path: str, src_url: str) -> str:
     repo_dir = local_mirror_repo_path(src_full_path)
     repo_parent = os.path.dirname(repo_dir)
@@ -988,20 +1112,29 @@ def mirror_project(src_project: dict, dst_project_full_path: str, target_created
         DST_SSH_PORT,
     )
 
-    if DRY_RUN:
-        source_refs = ls_remote_refs(src_url, "source")
-        target_refs = {}
+    source_refs = ls_remote_refs(src_url, "source")
+    target_refs = {}
 
+    if target_created_now:
+        log("[INFO] Target project is new; target refs start empty.")
+    else:
+        target_refs = ls_remote_refs(dst_url, "target")
+
+    _, _, to_delete, preserved_target_only = classify_ref_diff(source_refs, target_refs)
+
+    if DRY_RUN:
         if target_created_now:
             log("[DRY-RUN] Target project will be created; all source refs are pending mirror.")
-        else:
-            target_refs = ls_remote_refs(dst_url, "target")
 
         log_dry_run_ref_diff(dst_project_full_path, source_refs, target_refs)
         return
 
+    if not confirm_non_preserved_deletions(dst_project_full_path, to_delete):
+        return
+
     repo_dir = ensure_local_mirror(src_full_path, src_url)
     run(["git", "remote", "set-url", "--push", "origin", dst_url], cwd=repo_dir)
+    preserve_target_only_refs_in_local_mirror(repo_dir, dst_url, preserved_target_only)
     run_push_mirror_with_diagnostics(repo_dir, safe_dst_url)
 
     ok(f"Mirror completed: {dst_project_full_path}")

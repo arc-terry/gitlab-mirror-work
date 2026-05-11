@@ -11,6 +11,15 @@ to another — including subgroups, project creation, and full git history.
 - `pip install requests`
 - git CLI
 
+### Help
+
+```bash
+python3 mirror.py --help
+```
+
+This prints the full environment-variable usage and behavior notes without
+requiring the runtime variables to be set.
+
 ### Environment Variables
 
 **Required:**
@@ -36,6 +45,7 @@ to another — including subgroups, project creation, and full git history.
 | `SRC_SSH_PORT`         | *(default)* | Custom SSH port for source             |
 | `DST_SSH_PORT`         | *(default)* | Custom SSH port for target             |
 | `GIT_SSL_CAINFO`       | *(none)*  | Path to custom CA bundle                 |
+| `TARGET_DEV_BRANCH_PREFIX` | *(none)* | Keep target-only branches under this prefix (example: `arc-hsinchu`) |
 | `PUSH_EXISTING_PROJECTS` | `true`  | Re-push into existing target projects    |
 | `CONTINUE_ON_ERROR`    | `true`    | Keep going on per-project failures       |
 
@@ -55,6 +65,9 @@ you set `DRY_RUN=false`.
 
 Each run writes the latest output to `.lastlog` and archives it to `log/`
 as `<mmddyyyy>_<HHMMSS>_<RUN|DRYRUN>.log` (local system time).
+
+When `TARGET_DEV_BRANCH_PREFIX` is set, target-only branches under
+`<prefix>/*` are preserved and not deleted by mirror push.
 
 ## Practical Examples
 
@@ -123,6 +136,21 @@ the tool now prints:
 - symptom summary,
 - likely causes (protected refs, hooks, policy restrictions, permission gaps),
 - debug commands to inspect local and target refs in detail.
+
+### Preserve target development branches by prefix
+
+If you maintain target-only branches (for example `arc-hsinchu/*`), set:
+
+```bash
+TARGET_DEV_BRANCH_PREFIX=arc-hsinchu
+```
+
+Behavior:
+
+- `arc-hsinchu/*` target-only branches are kept.
+- Other target-only branches still follow mirror deletion behavior.
+- In real run (`DRY_RUN=false`), if non-preserved target refs would be deleted,
+  the script prompts for confirmation: `Delete <N> non-preserved target refs? [y/N]`.
 
 ## Background
 
