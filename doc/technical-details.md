@@ -201,6 +201,7 @@ new objects (`git fetch --prune`) instead of full re-clones.
 - `init_lastlog()` truncates `.lastlog` at the start of every run.
 - `log()` dual-writes each message to stdout and `.lastlog`.
 - `archive_lastlog()` copies `.lastlog` to `log/` after execution (success or failure).
+- `append_command_trace_to_log()` appends structured command traces into the same archived log file.
 - Specialized helpers (`section`, `status`, `warn`, `ok`, `fail`) format
   output consistently.
 
@@ -209,10 +210,13 @@ Runtime log files:
 | Path / Pattern | Meaning |
 |----------------|---------|
 | `.lastlog` | Latest run output only (refreshed each run) |
-| `log/<mmddyyyy>_<HHMMSS>_<RUN|DRYRUN>.log` | Archived per-run snapshot (local system time) |
+| `log/<mmddyyyy>_<HHMMSS>_<RUN|DRYRUN>.log` | Archived per-run snapshot with appended `COMMAND TRACE` section |
 
 If the same archive filename already exists in the same second, the script
 adds a numeric suffix (`_1`, `_2`, ...) to avoid overwrite.
+
+Command trace entries include mirror project numbers (`#1`, `#2`, ...) so
+commands can be correlated to each per-project mirror block.
 
 ## Path Translation
 

@@ -72,6 +72,9 @@ you set `DRY_RUN=false`.
 
 Each run writes the latest output to `.lastlog` and archives it to `log/`
 as `<mmddyyyy>_<HHMMSS>_<RUN|DRYRUN>.log` (local system time).
+The same archived `.log` file includes a `COMMAND TRACE` section with executed
+commands in markdown-style formatting. Each command entry includes a mirror
+project number so project-level actions are easy to trace.
 
 When `TARGET_DEV_BRANCH_PREFIX` is a real prefix, target-only branches under
 `<prefix>/*` are preserved and not deleted by mirror push.

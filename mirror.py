@@ -7,7 +7,7 @@ import shlex
 import subprocess
 import urllib.parse
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 import urllib3
@@ -50,6 +50,7 @@ Notes:
   - DRY_RUN=true prints planned changes and does not push.
   - In real run, non-preserved target ref deletions require confirmation unless AUTO_CONFIRM=true.
   - Latest run log is .lastlog; archive logs are written under log/.
+  - Command trace is appended to the same archived run log.
 """
 
 if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
@@ -129,6 +130,10 @@ GIT_SSL_CAINFO = os.environ.get("GIT_SSL_CAINFO")
 LOCAL_MIRROR_BASE = os.path.join(SCRIPT_DIR, "repositories_mirror-use")
 LASTLOG_PATH = os.path.join(SCRIPT_DIR, ".lastlog")
 LOG_ARCHIVE_DIR = os.path.join(SCRIPT_DIR, "log")
+COMMAND_TRACE: List[Dict[str, str]] = []
+MIRROR_PROJECT_COUNTER = 0
+CURRENT_PROJECT_NO: Optional[int] = None
+CURRENT_PROJECT_TARGET = ""
 
 PUSH_EXISTING_PROJECTS = os.environ.get("PUSH_EXISTING_PROJECTS", "true").lower() in (
     "1",
@@ -217,6 +222,33 @@ def write_last_config_snapshot():
     os.replace(tmp_path, LAST_CONFIG_PATH)
 
 
+def redact_sensitive_text(text: str) -> str:
+    redacted = text
+    for secret in (SRC_TOKEN, DST_TOKEN):
+        if secret:
+            redacted = redacted.replace(secret, "<TOKEN>")
+    return redacted
+
+
+def format_command(cmd: List[str]) -> str:
+    rendered = " ".join(shlex.quote(part) for part in cmd)
+    return redact_sensitive_text(rendered)
+
+
+def record_command(cmd: List[str], cwd: Optional[str], source: str, execution: str):
+    project_no = str(CURRENT_PROJECT_NO) if CURRENT_PROJECT_NO is not None else ""
+    COMMAND_TRACE.append(
+        {
+            "source": source,
+            "execution": execution,
+            "cwd": cwd or "",
+            "command": format_command(cmd),
+            "project_no": project_no,
+            "project_target": CURRENT_PROJECT_TARGET,
+        }
+    )
+
+
 def log_type_tag() -> str:
     return "DRYRUN" if DRY_RUN else "RUN"
 
@@ -228,13 +260,43 @@ def build_archive_log_path(stamp: str, sequence: int = 0) -> str:
     return os.path.join(LOG_ARCHIVE_DIR, filename)
 
 
-def archive_lastlog() -> str:
+def append_command_trace_to_log(archive_path: str):
+    with open(archive_path, "a", encoding="utf-8") as f:
+        f.write("\n")
+        f.write("=" * 72 + "\n")
+        f.write("COMMAND TRACE\n")
+        f.write("=" * 72 + "\n")
+        f.write(f"Run type: {log_type_tag()}\n")
+        f.write(f"Generated at: {datetime.now().isoformat(timespec='seconds')}\n")
+        f.write(f"Commands captured: {len(COMMAND_TRACE)}\n")
+
+        if not COMMAND_TRACE:
+            f.write("No commands were captured during this run.\n")
+            return
+
+        for idx, row in enumerate(COMMAND_TRACE, start=1):
+            cwd = row["cwd"] or SCRIPT_DIR
+            project_label = "-"
+            if row.get("project_no"):
+                project_label = f"#{row['project_no']}"
+                if row.get("project_target"):
+                    project_label = f"{project_label} {row['project_target']}"
+
+            f.write(
+                f"{idx}. [PROJECT {project_label}] {row['source']} "
+                f"({row['execution']}) cwd={cwd}\n"
+            )
+            f.write(f"   $ {row['command']}\n")
+
+
+def archive_lastlog(stamp: Optional[str] = None) -> str:
     if not os.path.exists(LASTLOG_PATH):
         raise RuntimeError(f"Latest log file does not exist: {LASTLOG_PATH}")
 
     os.makedirs(LOG_ARCHIVE_DIR, exist_ok=True)
 
-    stamp = datetime.now().strftime("%m%d%Y_%H%M%S")
+    if not stamp:
+        stamp = datetime.now().strftime("%m%d%Y_%H%M%S")
     archive_path = build_archive_log_path(stamp)
 
     seq = 1
@@ -384,8 +446,10 @@ def is_valid_bare_repo(path: str) -> bool:
     if not os.path.isdir(path):
         return False
 
+    cmd = ["git", "rev-parse", "--is-bare-repository"]
+    record_command(cmd, path, "bare-repo-probe", "run")
     probe = subprocess.run(
-        ["git", "rev-parse", "--is-bare-repository"],
+        cmd,
         cwd=path,
         check=False,
         stdout=subprocess.PIPE,
@@ -900,6 +964,8 @@ def parse_ls_remote_refs(output: str) -> dict:
 
 def ls_remote_refs(url: str, side: str) -> dict:
     cmd = ["git", "ls-remote", "--refs", url]
+    execution = "dry-run" if DRY_RUN else "run"
+    record_command(cmd, None, f"ls-remote:{side}", execution)
     proc = subprocess.run(
         cmd,
         check=False,
@@ -1051,6 +1117,7 @@ def log_history_rewrite_diagnostics(repo_dir: str, safe_dst_url: str):
 
 def run_push_mirror_with_diagnostics(repo_dir: str, safe_dst_url: str):
     cmd = ["git", "push", "--mirror"]
+    record_command(cmd, repo_dir, "push-mirror", "run")
     log(f"+ {' '.join(cmd)}")
 
     proc = subprocess.run(
@@ -1082,6 +1149,8 @@ def run_push_mirror_with_diagnostics(repo_dir: str, safe_dst_url: str):
 
 
 def run(cmd: List[str], cwd: Optional[str] = None):
+    execution = "dry-run" if DRY_RUN else "run"
+    record_command(cmd, cwd, "run()", execution)
     log(f"+ {' '.join(cmd)}")
 
     if DRY_RUN:
@@ -1160,62 +1229,74 @@ def ensure_local_mirror(src_full_path: str, src_url: str) -> str:
     return repo_dir
 
 
-def mirror_project(src_project: dict, dst_project_full_path: str, target_created_now: bool):
+def mirror_project(
+    src_project: dict,
+    dst_project_full_path: str,
+    target_created_now: bool,
+    project_no: int,
+):
+    global CURRENT_PROJECT_NO, CURRENT_PROJECT_TARGET
     src_full_path = src_project["path_with_namespace"]
+    CURRENT_PROJECT_NO = project_no
+    CURRENT_PROJECT_TARGET = dst_project_full_path
+    try:
+        log("")
+        log("-" * 72)
+        log(f"[MIRROR PROJECT #{project_no}]")
+        status("Source", src_full_path)
+        status("Target", dst_project_full_path)
+        status("Project #", str(project_no))
+        safe_src_url = safe_repo_url(SRC_GITLAB, src_full_path, SRC_GIT_PROTO, SRC_SSH_PORT)
+        safe_dst_url = safe_repo_url(DST_GITLAB, dst_project_full_path, DST_GIT_PROTO, DST_SSH_PORT)
+        status("Source URL", safe_src_url)
+        status("Target URL", safe_dst_url)
+        log("-" * 72)
 
-    log("")
-    log("-" * 72)
-    log(f"[MIRROR PROJECT]")
-    status("Source", src_full_path)
-    status("Target", dst_project_full_path)
-    safe_src_url = safe_repo_url(SRC_GITLAB, src_full_path, SRC_GIT_PROTO, SRC_SSH_PORT)
-    safe_dst_url = safe_repo_url(DST_GITLAB, dst_project_full_path, DST_GIT_PROTO, DST_SSH_PORT)
-    status("Source URL", safe_src_url)
-    status("Target URL", safe_dst_url)
-    log("-" * 72)
+        src_url = repo_url(
+            SRC_GITLAB,
+            SRC_TOKEN,
+            src_full_path,
+            SRC_GIT_PROTO,
+            SRC_SSH_PORT,
+        )
 
-    src_url = repo_url(
-        SRC_GITLAB,
-        SRC_TOKEN,
-        src_full_path,
-        SRC_GIT_PROTO,
-        SRC_SSH_PORT,
-    )
+        dst_url = repo_url(
+            DST_GITLAB,
+            DST_TOKEN,
+            dst_project_full_path,
+            DST_GIT_PROTO,
+            DST_SSH_PORT,
+        )
 
-    dst_url = repo_url(
-        DST_GITLAB,
-        DST_TOKEN,
-        dst_project_full_path,
-        DST_GIT_PROTO,
-        DST_SSH_PORT,
-    )
+        source_refs = ls_remote_refs(src_url, "source")
+        target_refs = {}
 
-    source_refs = ls_remote_refs(src_url, "source")
-    target_refs = {}
-
-    if target_created_now:
-        log("[INFO] Target project is new; target refs start empty.")
-    else:
-        target_refs = ls_remote_refs(dst_url, "target")
-
-    _, _, to_delete, preserved_target_only = classify_ref_diff(source_refs, target_refs)
-
-    if DRY_RUN:
         if target_created_now:
-            log("[DRY-RUN] Target project will be created; all source refs are pending mirror.")
+            log("[INFO] Target project is new; target refs start empty.")
+        else:
+            target_refs = ls_remote_refs(dst_url, "target")
 
-        log_dry_run_ref_diff(dst_project_full_path, source_refs, target_refs)
-        return
+        _, _, to_delete, preserved_target_only = classify_ref_diff(source_refs, target_refs)
 
-    if not confirm_non_preserved_deletions(dst_project_full_path, to_delete):
-        return
+        if DRY_RUN:
+            if target_created_now:
+                log("[DRY-RUN] Target project will be created; all source refs are pending mirror.")
 
-    repo_dir = ensure_local_mirror(src_full_path, src_url)
-    run(["git", "remote", "set-url", "--push", "origin", dst_url], cwd=repo_dir)
-    preserve_target_only_refs_in_local_mirror(repo_dir, dst_url, preserved_target_only)
-    run_push_mirror_with_diagnostics(repo_dir, safe_dst_url)
+            log_dry_run_ref_diff(dst_project_full_path, source_refs, target_refs)
+            return
 
-    ok(f"Mirror completed: {dst_project_full_path}")
+        if not confirm_non_preserved_deletions(dst_project_full_path, to_delete):
+            return
+
+        repo_dir = ensure_local_mirror(src_full_path, src_url)
+        run(["git", "remote", "set-url", "--push", "origin", dst_url], cwd=repo_dir)
+        preserve_target_only_refs_in_local_mirror(repo_dir, dst_url, preserved_target_only)
+        run_push_mirror_with_diagnostics(repo_dir, safe_dst_url)
+
+        ok(f"Mirror completed: {dst_project_full_path}")
+    finally:
+        CURRENT_PROJECT_NO = None
+        CURRENT_PROJECT_TARGET = ""
 
 
 # ============================================================
@@ -1223,6 +1304,7 @@ def mirror_project(src_project: dict, dst_project_full_path: str, target_created
 # ============================================================
 
 def migrate_group_recursive(src_group: dict):
+    global MIRROR_PROJECT_COUNTER
     src_group_full_path = src_group["full_path"]
     dst_group_full_path = map_source_to_target_path(src_group_full_path)
 
@@ -1256,7 +1338,13 @@ def migrate_group_recursive(src_group: dict):
             )
 
             if created_now or PUSH_EXISTING_PROJECTS:
-                mirror_project(project, dst_project_full_path, created_now)
+                MIRROR_PROJECT_COUNTER += 1
+                mirror_project(
+                    project,
+                    dst_project_full_path,
+                    created_now,
+                    MIRROR_PROJECT_COUNTER,
+                )
             else:
                 log(f"[SKIP PUSH EXISTING PROJECT] {dst_project_full_path}")
 
@@ -1301,6 +1389,7 @@ def main():
 
 if __name__ == "__main__":
     exit_code = 0
+    run_stamp = datetime.now().strftime("%m%d%Y_%H%M%S")
 
     try:
         main()
@@ -1312,7 +1401,8 @@ if __name__ == "__main__":
         exit_code = 1
     finally:
         try:
-            archive_path = archive_lastlog()
+            archive_path = archive_lastlog(run_stamp)
+            append_command_trace_to_log(archive_path)
             status("Archived log file", archive_path)
         except Exception as e:
             warn(f"Failed to archive execution log: {e}")

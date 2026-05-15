@@ -33,6 +33,7 @@ Core flow in `main()`:
    - mirror each project via persistent local bare cache under `repositories_mirror-use` (`git fetch --prune` + `git push --mirror`).
 6. Write latest runtime config snapshot to repository-root `.lastconfig.env` (tokens excluded).
 7. Write run logs to repository-root `.lastlog` (refreshed/truncated at each script start).
+8. Archive run logs to `log/*.log` and append per-run command traces into the same archived log file.
 
 Functional layers:
 - **Config + behavior flags:** top-level env parsing (`DRY_RUN`, `AUTO_CONFIRM`, `PUSH_EXISTING_PROJECTS`, `CONTINUE_ON_ERROR`, SSL/protocol options).
@@ -42,6 +43,7 @@ Functional layers:
 - **Local mirror cache:** `ensure_local_mirror()` reuses valid bare repos and re-clones when a conflicting non-bare path exists.
 - **Config persistence:** `.lastconfig.env` stores latest non-secret runtime config and is loaded as defaults on next run.
 - **Log persistence:** `init_lastlog()` truncates `.lastlog` each run; `log()` writes to both stdout and `.lastlog`.
+- **Command trace report:** executed mirror commands are appended to archived `log/*.log` with project numbering.
 
 ## Key conventions in this codebase
 
@@ -56,6 +58,7 @@ Functional layers:
 - Subgroup creation visibility is clamped by parent visibility to avoid invalid GitLab combinations (for example, public child under private parent).
 - `.lastlog` lives at repository root and always contains the latest execution output (not cumulative history).
 - `.lastconfig.env` lives at repository root and contains latest non-secret config only (never tokens).
+- Archived `log/*.log` files contain ordered command traces (with mirror project numbers) in a `COMMAND TRACE` section.
 
 ## Development discussion records policy
 
