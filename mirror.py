@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+VERSION = "1.0"
+
 import os
 import sys
 import shutil
@@ -15,11 +17,11 @@ import urllib3
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LAST_CONFIG_PATH = os.path.join(SCRIPT_DIR, ".lastconfig.env")
 
-HELP_TEXT = """
-GitLab nested group mirror
+HELP_TEXT = f"""
+GitLab nested group mirror (v{VERSION})
 
 Usage:
-  python3 mirror.py [--help|-h]
+  python3 mirror.py [--help|-h] [--version|-V]
 
 This tool is configured by environment variables.
 
@@ -52,6 +54,10 @@ Notes:
   - Latest run log is .lastlog; archive logs are written under log/.
   - Command trace is appended to the same archived run log.
 """
+
+if any(arg in ("-V", "--version") for arg in sys.argv[1:]):
+    print(f"mirror.py v{VERSION}")
+    sys.exit(0)
 
 if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
     print(HELP_TEXT.strip())

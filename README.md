@@ -194,6 +194,7 @@ For detailed technical information, see
 
 | Component      | Version / Detail  |
 |----------------|-------------------|
+| Version        | 1.0               |
 | Language       | Python 3          |
 | Dependencies   | `requests`        |
 | GitLab API     | v4                |
