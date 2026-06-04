@@ -1165,6 +1165,55 @@ def run(cmd: List[str], cwd: Optional[str] = None):
     subprocess.run(cmd, cwd=cwd, check=True, env=git_command_env())
 
 
+def delete_hidden_refs_from_local_mirror(repo_dir: str):
+    """
+    Delete GitLab hidden refs (merge-requests, pipelines, environments) from
+    local mirror before push. These refs cannot be pushed to GitLab and would
+    cause 'deny updating a hidden ref' errors.
+    """
+    if DRY_RUN:
+        return
+
+    hidden_prefixes = [
+        "refs/merge-requests/",
+        "refs/pipelines/",
+        "refs/environments/",
+    ]
+
+    result = subprocess.run(
+        ["git", "show-ref"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        return
+
+    refs_to_delete = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            ref_name = parts[1]
+            if any(ref_name.startswith(prefix) for prefix in hidden_prefixes):
+                refs_to_delete.append(ref_name)
+
+    if not refs_to_delete:
+        return
+
+    log(f"[SKIP HIDDEN REFS] Deleting {len(refs_to_delete)} GitLab-internal refs from local mirror")
+    log("  (merge-requests, pipelines, environments are managed by GitLab and cannot be mirrored)")
+
+    for ref in refs_to_delete:
+        subprocess.run(
+            ["git", "update-ref", "-d", ref],
+            cwd=repo_dir,
+            check=False,
+            capture_output=True,
+        )
+
+
 def confirm_non_preserved_deletions(
     dst_project_full_path: str,
     to_delete: List[Tuple[str, str]],
@@ -1295,6 +1344,7 @@ def mirror_project(
             return
 
         repo_dir = ensure_local_mirror(src_full_path, src_url)
+        delete_hidden_refs_from_local_mirror(repo_dir)
         run(["git", "remote", "set-url", "--push", "origin", dst_url], cwd=repo_dir)
         preserve_target_only_refs_in_local_mirror(repo_dir, dst_url, preserved_target_only)
         run_push_mirror_with_diagnostics(repo_dir, safe_dst_url)

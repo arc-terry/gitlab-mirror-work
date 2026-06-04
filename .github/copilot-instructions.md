@@ -11,7 +11,7 @@ Use these commands during development:
 pip install requests
 
 # Run the script (dry-run by default)
-SRC_GITLAB=... DST_GITLAB=... SRC_TOKEN=... DST_TOKEN=... SRC_ROOT_GROUP=... python3 mirror.py
+SRC_GITLAB=... DST_GITLAB=... SRC_TOKEN=... DST_TOKEN=... SRC_ROOT_GROUP=... TARGET_DEV_BRANCH_PREFIX=... python3 mirror.py
 ```
 
 There is no repository-defined “single test” command yet.
