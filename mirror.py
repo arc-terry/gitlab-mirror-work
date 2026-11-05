@@ -182,7 +182,10 @@ if not VERIFY_SSL:
 
 def log(msg: str):
     text = str(msg)
-    print(text, flush=True)
+    if text.startswith("[MIRROR PROJECT #") and sys.stdout.isatty():
+        print(f"\033[32m{text}\033[0m", flush=True)
+    else:
+        print(text, flush=True)
     with open(LASTLOG_PATH, "a", encoding="utf-8") as f:
         f.write(text + "\n")
 
@@ -1295,9 +1298,6 @@ def mirror_project(
     CURRENT_PROJECT_NO = project_no
     CURRENT_PROJECT_TARGET = dst_project_full_path
     try:
-        log("")
-        log("-" * 72)
-        log(f"[MIRROR PROJECT #{project_no}]")
         status("Source", src_full_path)
         status("Target", dst_project_full_path)
         status("Project #", str(project_no))
@@ -1305,7 +1305,6 @@ def mirror_project(
         safe_dst_url = safe_repo_url(DST_GITLAB, dst_project_full_path, DST_GIT_PROTO, DST_SSH_PORT)
         status("Source URL", safe_src_url)
         status("Target URL", safe_dst_url)
-        log("-" * 72)
 
         src_url = repo_url(
             SRC_GITLAB,
@@ -1368,6 +1367,7 @@ def migrate_group_recursive(src_group: dict):
     if "/" in dst_group_full_path:
         parent_dst_path = dst_group_full_path.rsplit("/", 1)[0]
 
+    log("")
     create_group_if_missing(
         target_full_path=dst_group_full_path,
         name=src_group["name"],
@@ -1383,6 +1383,9 @@ def migrate_group_recursive(src_group: dict):
         dst_project_full_path = map_source_to_target_path(src_project_full_path)
         dst_namespace_full_path = dst_project_full_path.rsplit("/", 1)[0]
 
+        MIRROR_PROJECT_COUNTER += 1
+        log("")
+        log(f"[MIRROR PROJECT #{MIRROR_PROJECT_COUNTER}]")
         try:
             _, created_now = create_project_if_missing(
                 target_full_path=dst_project_full_path,
@@ -1394,7 +1397,6 @@ def migrate_group_recursive(src_group: dict):
             )
 
             if created_now or PUSH_EXISTING_PROJECTS:
-                MIRROR_PROJECT_COUNTER += 1
                 mirror_project(
                     project,
                     dst_project_full_path,

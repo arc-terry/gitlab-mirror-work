@@ -75,6 +75,10 @@ as `<mmddyyyy>_<HHMMSS>_<RUN|DRYRUN>.log` (local system time).
 The same archived `.log` file includes a `COMMAND TRACE` section with executed
 commands in markdown-style formatting. Each command entry includes a mirror
 project number so project-level actions are easy to trace.
+Repository activity stays together under one `[MIRROR PROJECT #N]` heading,
+including creation/existence status and skipped or failed projects. Headings
+are green on interactive terminals; saved logs and redirected output stay plain
+text. Project numbering includes skipped and failed projects.
 
 When `TARGET_DEV_BRANCH_PREFIX` is a real prefix, target-only branches under
 `<prefix>/*` are preserved and not deleted by mirror push.
@@ -175,8 +179,11 @@ projects, then performs git-level mirroring via `git clone --mirror` /
 `git fetch --prune` + `git push --mirror` through a persistent local bare
 repository cache.
 
-For detailed technical information, see
-[doc/technical-details.md](doc/technical-details.md).
+For architecture and development guidance, see [AGENTS.md](AGENTS.md).
+Completed feature designs:
+
+- [Preserve target development branches](docs/superpowers/specs/2026-05-11-preserve-target-development-branches-design.md)
+- [Group repository log output](docs/superpowers/specs/2026-11-05-group-repository-log-output-design.md)
 
 ### Limitations
 
